@@ -11,6 +11,7 @@ export interface Project {
   color: string;
   startDate: string | null;
   dueDate: string | null;
+  sortOrder: number;
   createdAt: string;
   updatedAt: string;
   taskCount: number;

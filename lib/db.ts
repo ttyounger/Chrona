@@ -20,6 +20,7 @@ database.exec(`
     color TEXT NOT NULL DEFAULT '#6d5dfc',
     start_date TEXT,
     due_date TEXT,
+    sort_order INTEGER NOT NULL DEFAULT 0,
     created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
     updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
   );
@@ -44,6 +45,12 @@ database.exec(`
     value TEXT NOT NULL
   );
 `);
+
+const projectColumns = database.prepare("PRAGMA table_info(projects)").all() as Array<Record<string, unknown>>;
+if (!projectColumns.some(column => String(column.name) === "sort_order")) {
+  database.exec("ALTER TABLE projects ADD COLUMN sort_order INTEGER NOT NULL DEFAULT 0");
+  database.exec("UPDATE projects SET sort_order = id");
+}
 
 const legacyTodoTable = database.prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'todos'").get();
 if (legacyTodoTable) {
@@ -76,6 +83,7 @@ function projectFromRow(row: Row): Project {
     color: String(row.color),
     startDate: row.start_date ? String(row.start_date) : null,
     dueDate: row.due_date ? String(row.due_date) : null,
+    sortOrder: Number(row.sort_order || 0),
     createdAt: String(row.created_at),
     updatedAt: String(row.updated_at),
     taskCount: Number(row.task_count || 0),
@@ -102,7 +110,7 @@ export function listProjects(): Project[] {
     FROM projects p
     LEFT JOIN tasks t ON t.project_id = p.id
     WHERE p.status != 'archived'
-    GROUP BY p.id ORDER BY p.updated_at DESC
+    GROUP BY p.id ORDER BY p.sort_order, p.id
   `).all() as Row[];
   return rows.map(projectFromRow);
 }
@@ -121,19 +129,33 @@ export function getProject(id: number): ProjectDetail | null {
 }
 
 export function createProject(input: { name: string; description?: string; goal?: string; dueDate?: string | null; color?: string }): ProjectDetail {
-  const result = database.prepare("INSERT INTO projects (name, description, goal, due_date, color) VALUES (?, ?, ?, ?, ?)")
-    .run(input.name, input.description || "", input.goal || "", input.dueDate || null, input.color || "#6d5dfc");
+  const nextOrder = Number((database.prepare("SELECT COALESCE(MAX(sort_order), -1) + 1 AS value FROM projects").get() as Row).value);
+  const result = database.prepare("INSERT INTO projects (name, description, goal, due_date, color, sort_order) VALUES (?, ?, ?, ?, ?, ?)")
+    .run(input.name, input.description || "", input.goal || "", input.dueDate || null, input.color || "#6d5dfc", nextOrder);
   return getProject(Number(result.lastInsertRowid))!;
 }
 
-export function updateProject(id: number, input: Partial<{ name: string; description: string; goal: string; status: string; dueDate: string | null; color: string }>) {
+export function updateProject(id: number, input: Partial<{ name: string; description: string; goal: string; status: string; dueDate: string | null; color: string; sortOrder: number }>) {
   const entries = Object.entries(input).filter(([, value]) => value !== undefined);
-  const columns: Record<string, string> = { name: "name", description: "description", goal: "goal", status: "status", dueDate: "due_date", color: "color" };
+  const columns: Record<string, string> = { name: "name", description: "description", goal: "goal", status: "status", dueDate: "due_date", color: "color", sortOrder: "sort_order" };
   if (entries.length) {
     database.prepare(`UPDATE projects SET ${entries.map(([key]) => `${columns[key]} = ?`).join(", ")}, updated_at = CURRENT_TIMESTAMP WHERE id = ?`)
       .run(...entries.map(([, value]) => value), id);
   }
   return getProject(id);
+}
+
+export function reorderProjects(projectIds: number[]) {
+  const updateOrder = database.prepare("UPDATE projects SET sort_order = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?");
+  database.exec("BEGIN");
+  try {
+    projectIds.forEach((projectId, index) => updateOrder.run(index, projectId));
+    database.exec("COMMIT");
+  } catch (error) {
+    database.exec("ROLLBACK");
+    throw error;
+  }
+  return listProjects();
 }
 
 export function deleteProject(id: number) {
